@@ -75,7 +75,8 @@ class TestContinuity(unittest.TestCase):
         self.assertEqual(len(scenes), 2)
         self.assertEqual(scenes[0]["location_name"], "PLATFORM 7")
         self.assertEqual(scenes[0]["time_of_day"], "NIGHT")
-        self.assertIn("Rahul", scenes[0]["characters"])
+        char_names = [c["name"] for c in scenes[0]["characters"]]
+        self.assertIn("Rahul", char_names)
         self.assertEqual(scenes[1]["location_name"], "STATION CAFÉ")
 
     def test_clickhouse_event_logging(self):

@@ -284,9 +284,20 @@ export const App: React.FC = () => {
         isOpen={isScriptModalOpen}
         onClose={() => setIsScriptModalOpen(false)}
         projectId={currentProject?.id || 'proj_midnight_7'}
-        onSuccess={() => {
-          if (currentProject?.id) loadProjectData(currentProject.id);
-          showToast("New script scene parsed and added to movie state!");
+        onSuccess={async (newProjectId) => {
+          try {
+            const projs = await api.getProjects();
+            setProjects(projs);
+            const targetId = newProjectId || currentProject?.id || projs[0]?.id;
+            const targetProj = projs.find(p => p.id === targetId) || projs[0];
+            if (targetProj) {
+              setCurrentProject(targetProj);
+              await loadProjectData(targetProj.id);
+            }
+            showToast("Script successfully ingested & continuity analysis complete!");
+          } catch (e) {
+            console.error(e);
+          }
         }}
       />
 

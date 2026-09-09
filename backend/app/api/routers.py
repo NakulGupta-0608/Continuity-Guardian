@@ -423,6 +423,9 @@ async def upload_script_endpoint(
     project_id: str,
     file: Optional[UploadFile] = File(None),
     script_text: Optional[str] = Form(None),
+    mode: Optional[str] = Form("append"), # "append", "replace", or "new_project"
+    project_title: Optional[str] = Form(None),
+    genre: Optional[str] = Form("Drama"),
     db: Session = Depends(get_db)
 ):
     content = ""
@@ -431,7 +434,6 @@ async def upload_script_endpoint(
         try:
             content = file_bytes.decode("utf-8")
         except UnicodeDecodeError:
-            # Fallback for binary or Latin-1
             content = file_bytes.decode("latin-1", errors="ignore")
     elif script_text:
         content = script_text
@@ -439,38 +441,144 @@ async def upload_script_endpoint(
         raise HTTPException(status_code=400, detail="No script file or text provided")
 
     parsed_scenes = script_parser.parse_screenplay_text(content)
-    
-    # Ingest parsed scenes
-    imported_count = 0
+    if not parsed_scenes:
+        raise HTTPException(status_code=400, detail="Could not detect any scenes. Please ensure your script contains scene headings (e.g. 'INT. LOCATION - DAY' or 'Scene 1', 'Location: ...').")
+
+    # If new project requested
+    target_project_id = project_id
+    if mode == "new_project":
+        new_proj_id = f"proj_{uuid.uuid4().hex[:8]}"
+        title = project_title or f"Custom Production {new_proj_id[-4:]}"
+        new_proj = Project(
+            id=new_proj_id,
+            title=title,
+            genre=genre or "Drama",
+            description="User-uploaded custom film production script.",
+            image_url="https://images.unsplash.com/photo-1485846234645-a62644f84728?w=800&q=80",
+            language="English",
+            status="Pre-Production",
+            health_score=100
+        )
+        db.add(new_proj)
+        db.commit()
+        target_project_id = new_proj_id
+
+    # If replace requested: clear existing scenes and issues for this project
+    if mode == "replace":
+        db.query(ContinuityIssue).filter(ContinuityIssue.project_id == target_project_id).delete()
+        db.query(Scene).filter(Scene.project_id == target_project_id).delete()
+        db.commit()
+
+    # Determine starting scene number
+    existing_scenes = db.query(Scene).filter(Scene.project_id == target_project_id).all()
+    next_scene_num = (max([s.scene_number for s in existing_scenes] or [0]) + 1) if mode == "append" else 1
+
     now = datetime.datetime.utcnow()
-    
+    characters_created = 0
+    props_created = 0
+
     for ps in parsed_scenes:
-        sc_id = f"scene_{ps['scene_number']:02d}_{uuid.uuid4().hex[:4]}"
+        sc_num = next_scene_num if mode == "append" else ps["scene_number"]
+        sc_id = f"scene_{sc_num:02d}_{uuid.uuid4().hex[:4]}"
+        
         new_scene = Scene(
             id=sc_id,
-            project_id=project_id,
-            scene_number=ps["scene_number"],
-            title=ps["title"],
-            location_name=ps["location_name"],
-            time_of_day=ps["time_of_day"],
-            weather=ps["weather"],
+            project_id=target_project_id,
+            scene_number=sc_num,
+            title=ps.get("title", f"Scene {sc_num}"),
+            location_name=ps.get("location_name", "Location"),
+            time_of_day=ps.get("time_of_day", "Day"),
+            weather=ps.get("weather", "Clear"),
             emotional_tone="Neutral",
-            summary=ps["summary"],
-            script_content=ps["script_content"],
-            events_json=json.dumps(ps["events"]),
-            sequence_order=ps["scene_number"],
+            summary=ps.get("summary", ""),
+            script_content=ps.get("script_content", ""),
+            events_json=json.dumps(ps.get("events", [])),
+            sequence_order=sc_num,
             created_at=now
         )
         db.add(new_scene)
-        imported_count += 1
+        db.flush()
+
+        # Link/Create Location
+        loc_name = ps.get("location_name", "Location")
+        loc = db.query(Location).filter(Location.project_id == target_project_id, Location.name.ilike(loc_name)).first()
+        if not loc:
+            loc = Location(
+                id=f"loc_{uuid.uuid4().hex[:6]}",
+                project_id=target_project_id,
+                name=loc_name,
+                environment_type=ps.get("environment_type", "Interior")
+            )
+            db.add(loc)
+
+        # Link/Create Characters & SceneCharacters
+        for c_data in ps.get("characters", []):
+            c_name = c_data["name"]
+            char = db.query(Character).filter(Character.project_id == target_project_id, Character.name.ilike(c_name)).first()
+            if not char:
+                char = Character(
+                    id=f"char_{uuid.uuid4().hex[:6]}",
+                    project_id=target_project_id,
+                    name=c_name,
+                    role="Cast",
+                    default_wardrobe=c_data.get("wardrobe", "Standard attire"),
+                    default_condition=c_data.get("condition", "Healthy"),
+                    current_location=loc_name,
+                    created_at=now
+                )
+                db.add(char)
+                db.flush()
+                characters_created += 1
+
+            sc_char = SceneCharacter(
+                id=f"sc_char_{uuid.uuid4().hex[:6]}",
+                scene_id=new_scene.id,
+                character_id=char.id,
+                wardrobe=c_data.get("wardrobe", char.default_wardrobe),
+                condition=c_data.get("condition", char.default_condition),
+                current_location=loc_name,
+                dialogue_lines_json=json.dumps(c_data.get("dialogue", []))
+            )
+            db.add(sc_char)
+
+        # Link/Create Props & SceneProps
+        for p_data in ps.get("props", []):
+            p_name = p_data["name"]
+            prop = db.query(Prop).filter(Prop.project_id == target_project_id, Prop.name.ilike(p_name)).first()
+            if not prop:
+                prop = Prop(
+                    id=f"prop_{uuid.uuid4().hex[:6]}",
+                    project_id=target_project_id,
+                    name=p_name,
+                    category="Prop",
+                    current_location=loc_name,
+                    created_at=now
+                )
+                db.add(prop)
+                db.flush()
+                props_created += 1
+
+            sc_prop = SceneProp(
+                id=f"sc_prop_{uuid.uuid4().hex[:6]}",
+                scene_id=new_scene.id,
+                prop_id=prop.id,
+                location=p_data.get("location", loc_name),
+                holder=p_data.get("holder", "")
+            )
+            db.add(sc_prop)
+
+        next_scene_num += 1
 
     db.commit()
 
-    # Re-run continuity analysis on new script
-    analysis = continuity_engine.run_full_check(project_id, db)
+    # Re-run full continuity check on target project
+    analysis = continuity_engine.run_full_check(target_project_id, db)
 
     return {
         "status": "success",
-        "scenes_imported": imported_count,
+        "project_id": target_project_id,
+        "scenes_imported": len(parsed_scenes),
+        "characters_created": characters_created,
+        "props_created": props_created,
         "continuity_analysis": analysis
     }

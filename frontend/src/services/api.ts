@@ -99,18 +99,30 @@ export const api = {
     return res.json();
   },
 
-  async uploadScript(projectId: string, scriptText: string, file?: File): Promise<any> {
+  async uploadScript(
+    projectId: string,
+    scriptText: string,
+    file?: File,
+    options?: { mode?: 'append' | 'replace' | 'new_project'; project_title?: string; genre?: string }
+  ): Promise<any> {
     const formData = new FormData();
     if (file) {
       formData.append('file', file);
     } else {
       formData.append('script_text', scriptText);
     }
+    if (options?.mode) formData.append('mode', options.mode);
+    if (options?.project_title) formData.append('project_title', options.project_title);
+    if (options?.genre) formData.append('genre', options.genre);
+
     const res = await fetch(`${API_BASE}/projects/${projectId}/upload-script`, {
       method: 'POST',
       body: formData
     });
-    if (!res.ok) throw new Error('Failed to upload script');
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || 'Failed to upload and parse script');
+    }
     return res.json();
   }
 };
